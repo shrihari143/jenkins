@@ -1,6 +1,21 @@
 version: '3'
 services:
+  jenkins:
+    build:
+      context: ./jenkins-docker
+    user: root
+    ports:
+      - "8080:8080"
+      - "50000:50000"
+    volumes:
+      - jenkins_home:/var/jenkins_home
+      - /var/run/docker.sock:/var/run/docker.sock  # 👈 enables Jenkins to talk to Docker
+    privileged: true
+
   node-app:
     build: .
     ports:
       - "3000:3000"
+
+volumes:
+  jenkins_home:
