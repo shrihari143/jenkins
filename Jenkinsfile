@@ -3,22 +3,38 @@ pipeline {
     environment {
         IMAGE_NAME = 'nodejs-app'
         CONTAINER_NAME = 'nodejs-container'
-        DOCKER_HOST = 'unix:///var/run/docker.sock'  // Explicit Docker socket
+        DOCKER_HOST = 'unix:///var/run/docker.sock'
     }
     options {
-        timeout(time: 15, unit: 'MINUTES')  // Build timeout
-        disableConcurrentBuilds()            // Prevent parallel runs
+        timeout(time: 15, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '5'))
     }
     stages {
-        stage('Verify Docker') {
+        stage('Verify Environment') {
             steps {
                 script {
-                    // Check Docker is available
-                    sh '''
-                        docker --version || { echo "ERROR: Docker not found!"; exit 1 }
-                        docker info || { echo "ERROR: Cannot connect to Docker daemon"; exit 1 }
-                    '''
+                    // Verify Docker is accessible
+                    def dockerVersion = sh(script: 'docker --version', returnStdout: true).trim()
+                    echo "Docker Version: ${dockerVersion}"
+                    
+                    // Verify Docker socket permissions
+                    def socketPerms = sh(script: 'stat -c "%a %U:%G" /var/run/docker.sock', returnStdout: true).trim()
+                    if (!socketPerms.contains('666') && !socketPerms.contains('docker')) {
+                        error "Docker socket permissions insufficient: ${socketPerms}"
+                    }
                 }
+            }
+        }
+
+        stage('Checkout Code') {
+            steps {
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    extensions: [],
+                    userRemoteConfigs: [[url: 'https://github.com/shrihari143/jenkins.git']]
+                ])
             }
         }
 
@@ -33,59 +49,52 @@ pipeline {
             }
             post {
                 success {
-                    echo "Successfully built Docker image: $IMAGE_NAME"
-                }
-                failure {
-                    error "Failed to build Docker image"
+                    echo "Successfully built image ${IMAGE_NAME}"
+                    sh 'docker images ${IMAGE_NAME}'
                 }
             }
         }
 
-        stage('Stop Old Container') {
+        stage('Deploy Container') {
             steps {
-                sh '''
-                    if docker inspect $CONTAINER_NAME >/dev/null 2>&1; then
-                        echo "Stopping existing container..."
-                        docker stop $CONTAINER_NAME || true
-                        docker rm $CONTAINER_NAME || true
-                    else
-                        echo "No existing container found"
-                    fi
-                '''
-            }
-        }
-
-        stage('Run New Container') {
-            steps {
-                sh '''
-                    docker run -d \
-                        --name $CONTAINER_NAME \
-                        -p 3000:3000 \
-                        --restart unless-stopped \
-                        $IMAGE_NAME
-                '''
-            }
-            post {
-                success {
-                    echo "Container started successfully"
-                    sh 'docker ps -f name=$CONTAINER_NAME'
+                script {
+                    // Gracefully stop and remove old container if exists
+                    def containerExists = sh(
+                        script: "docker ps -a --filter name=${CONTAINER_NAME} --format '{{.Names}}'",
+                        returnStdout: true
+                    ).trim()
+                    
+                    if (containerExists) {
+                        echo "Removing existing container: ${containerExists}"
+                        sh "docker stop ${CONTAINER_NAME} || true"
+                        sh "docker rm ${CONTAINER_NAME} || true"
+                    }
+                    
+                    // Run new container
+                    sh """
+                        docker run -d \
+                            --name ${CONTAINER_NAME} \
+                            -p 3000:3000 \
+                            --restart unless-stopped \
+                            ${IMAGE_NAME}
+                    """
                 }
             }
         }
 
         stage('Verify Deployment') {
             steps {
-                retry(3) {  // Retry up to 3 times
+                retry(3) {
                     script {
-                        // Check if container is responding
-                        def response = sh(
-                            script: 'curl -s -o /dev/null -w "%{http_code}" http://localhost:3000 || true',
+                        def status = sh(
+                            script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000 || true",
                             returnStdout: true
                         ).trim()
                         
-                        if (response != "200") {
-                            error "Application not responding (HTTP $response)"
+                        if (status != '200') {
+                            error "Application not healthy (HTTP ${status})"
                         }
+                        echo "Application is running (HTTP ${status})"
                     }
                 }
             }
@@ -94,22 +103,22 @@ pipeline {
     post {
         always {
             script {
-                // Cleanup Docker artifacts
+                echo "Cleaning up Docker resources..."
                 sh '''
                     docker system prune -f --filter "until=24h" || true
                     docker volume prune -f || true
                 '''
-                
-                // Archive logs if needed
-                archiveArtifacts artifacts: '**/logs/*.log', allowEmptyArchive: true
+                cleanWs()
             }
         }
         success {
-            slackSend color: 'good', message: "SUCCESS: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
+            echo "Pipeline completed successfully!"
         }
         failure {
-            slackSend color: 'danger', message: "FAILED: ${env.JOB_NAME} #${env.BUILD_NUMBER}"
-            sh 'docker logs $CONTAINER_NAME --tail 50 || true'
+            script {
+                echo "Pipeline failed - checking container logs..."
+                sh "docker logs ${CONTAINER_NAME} --tail 50 || true"
+            }
         }
     }
 }
