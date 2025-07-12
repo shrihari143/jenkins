@@ -4,6 +4,8 @@ pipeline {
         IMAGE_NAME = 'nodejs-app'
         CONTAINER_NAME = 'nodejs-container'
         DOCKER_HOST = 'unix:///var/run/docker.sock'
+        // Add this - replace with your actual server IP/hostname
+        HOST_IP = '52.66.246.55' 
     }
     options {
         timeout(time: 15, unit: 'MINUTES')
@@ -14,11 +16,9 @@ pipeline {
         stage('Verify Environment') {
             steps {
                 script {
-                    // Verify Docker is accessible
                     def dockerVersion = sh(script: 'docker --version', returnStdout: true).trim()
                     echo "Docker Version: ${dockerVersion}"
                     
-                    // Verify Docker socket permissions
                     def socketPerms = sh(script: 'stat -c "%a %U:%G" /var/run/docker.sock', returnStdout: true).trim()
                     if (!socketPerms.contains('666') && !socketPerms.contains('docker')) {
                         error "Docker socket permissions insufficient: ${socketPerms}"
@@ -58,7 +58,6 @@ pipeline {
         stage('Deploy Container') {
             steps {
                 script {
-                    // Gracefully stop and remove old container if exists
                     def containerExists = sh(
                         script: "docker ps -a --filter name=${CONTAINER_NAME} --format '{{.Names}}'",
                         returnStdout: true
@@ -70,7 +69,6 @@ pipeline {
                         sh "docker rm ${CONTAINER_NAME} || true"
                     }
                     
-                    // Run new container
                     sh """
                         docker run -d \
                             --name ${CONTAINER_NAME} \
@@ -86,8 +84,9 @@ pipeline {
             steps {
                 retry(3) {
                     script {
+                        // Changed from localhost to HOST_IP
                         def status = sh(
-                            script: "curl -s -o /dev/null -w '%{http_code}' http://localhost:3000 || true",
+                            script: "curl -s -o /dev/null -w '%{http_code}' http://${HOST_IP}:3000 || true",
                             returnStdout: true
                         ).trim()
                         
@@ -113,6 +112,7 @@ pipeline {
         }
         success {
             echo "Pipeline completed successfully!"
+            echo "Application is available at: http://${HOST_IP}:3000"
         }
         failure {
             script {
